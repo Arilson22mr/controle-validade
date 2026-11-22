@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import requests
 from supabase import create_client
 from datetime import datetime, date
 
@@ -27,10 +28,6 @@ def verificar_senha():
 if not verificar_senha():
     st.stop()
 
-# ==============================================================================
-# DAQUI PARA BAIXO O CÓDIGO SÓ RODA SE A SENHA ESTIVER CORRETA
-# ==============================================================================
-
 # --- 2. CONEXÃO COM O SUPABASE (NUVEM) ---
 @st.cache_resource
 def iniciar_conexao():
@@ -55,6 +52,54 @@ def listar_produtos():
 
 def remover_produto(produto_id):
     supabase.table("produtos").delete().eq("id", produto_id).execute()
+
+# --- FUNÇÃO DE ALERTA TELEGRAM (FILTRA <= 30 DIAS) ---
+def enviar_resumo_telegram(lista_produtos):
+    hoje = date.today()
+    criticos = []
+    
+    for item in lista_produtos:
+        data_val = datetime.strptime(item["validade"], "%Y-%m-%d").date()
+        dias = (data_val - hoje).days
+        
+        if dias <= 30:
+            if dias < 0:
+                tag = f"🔴 VENCIDO há {abs(dias)}d"
+            elif dias == 0:
+                tag = "🔴 VENCE HOJE"
+            elif dias <= 7:
+                tag = f"🟠 URGENTE ({dias}d)"
+            else:
+                tag = f"🟡 ATENÇÃO ({dias}d)"
+                
+            criticos.append((dias, f"{tag} | *{item['nome']}* (Lote: {item['lote']} | Qtd: {item['quantidade']}) - Val: {data_val.strftime('%d/%m/%Y')}"))
+
+    if not criticos:
+        return False, "Nenhum produto vencido ou faltando 30 dias para vencer."
+
+    criticos.sort(key=lambda x: x[0])
+    linhas = [texto for _, texto in criticos]
+    
+    mensagem = (
+        f"🚨 *ALERTA DE VALIDADE (Próximos 30 dias)*\n"
+        f"📅 Data: {hoje.strftime('%d/%m/%Y')}\n\n"
+        + "\n".join(linhas)
+    )
+    
+    token = st.secrets["TELEGRAM_TOKEN"]
+    chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    
+    resposta = requests.post(url, json={
+        "chat_id": chat_id,
+        "text": mensagem,
+        "parse_mode": "Markdown"
+    })
+    
+    if resposta.status_code == 200:
+        return True, f"Resumo com {len(criticos)} produto(s) enviado para o Telegram!"
+    else:
+        return False, f"Erro ao enviar no Telegram: {resposta.text}"
 
 # --- 3. INTERFACE VISUAL ---
 col_titulo, col_sair = st.columns([5, 1])
@@ -111,7 +156,17 @@ st.divider()
 if dados_processados:
     df = pd.DataFrame(dados_processados).sort_values(by="Dias Restantes")
     
-    st.subheader("Visão Geral do Estoque (Ordenado por Urgência)")
+    col_sub, col_tg = st.columns([3, 2])
+    col_sub.subheader("Visão Geral do Estoque (Ordenado por Urgência)")
+    
+    if col_tg.button("📲 Enviar Alerta Crítico (≤ 30 dias) no Telegram", use_container_width=True):
+        sucesso, aviso = enviar_resumo_telegram(produtos_salvos)
+        if sucesso:
+            st.toast(aviso, icon="✅")
+            st.success(aviso)
+        else:
+            st.warning(aviso)
+            
     st.dataframe(df, use_container_width=True, hide_index=True)
     
     # --- 5. ÁREA PARA DAR BAIXA (EXCLUIR) ---
